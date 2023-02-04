@@ -1,0 +1,322 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `customer_portfolio`(varCustomerId INT(3), varYear INT(1), varTicker1 VARCHAR(6), varTicker2 VARCHAR(6), varTicker3 VARCHAR(6), varTicker4 VARCHAR(6))
+BEGIN
+
+	-- create customer information
+		WITH customer_information_table AS (
+        SELECT  cs.customer_id, 
+				full_name, 
+                opt38_desc, 
+                account_id, 
+                acct_open_date,
+                CASE WHEN acct_open_status THEN 'Active'
+					 ELSE 'Inactive' END,
+				email,
+                customer_location
+		FROM customer_details AS cs
+        LEFT JOIN account_dim AS ad
+        ON cs.customer_id = ad.client_id
+        WHERE cs.customer_id = varCustomerId),
+	-- create total number of investment for the customer
+        total_investment_amount_table AS (
+        SELECT client_id AS customer_id,
+			   SUM(value * quantity) AS total_investment
+        FROM holdings_current
+        LEFT JOIN account_dim
+        USING(account_id)
+        WHERE client_id = varCustomerId),
+	-- create customer ticker list
+		customer_ticker_list AS (
+		SELECT  ad.client_id AS customer_id, 
+				hc.ticker AS ticker,
+                AVG(value) AS value,
+                SUM(quantity) AS quantity,
+                SUM(value * quantity) AS amount,
+                SUM(value * quantity) / total_investment AS weight,
+                sec_type,
+                CASE WHEN major_asset_class = 'fixed_income' THEN 'fixed income'
+					 ELSE major_asset_class END AS major_asset_class,
+                minor_asset_class
+		 FROM account_dim AS ad
+		 LEFT JOIN holdings_current hc
+		 USING(account_id)
+         LEFT JOIN security_masterlist AS sm
+         USING(ticker)
+         LEFT JOIN total_investment_amount_table AS tiam
+         ON tiam.customer_id = ad.client_id
+		 WHERE ad.client_id = varCustomerId
+		 GROUP BY  ad.client_id, hc.ticker, sec_type, major_asset_class, minor_asset_class),
+	-- create return of each ticker table
+		return_of_each_ticker_table AS (
+		SELECT	returns.ticker AS ticker,
+				AVG(returns.returns) AS mean,
+				STDDEV(returns.returns) * SQRT(250) AS standard_dev,
+				AVG(returns.returns)/(STDDEV(returns.returns)* SQRT(250)) AS risk_adjusted_return
+		FROM (SELECT a.date,
+					 a.ticker,
+					 (a.value-a.lagged_price)/a.lagged_price AS returns
+			  FROM ( SELECT *, LAG(value, 1)OVER(
+					 PARTITION BY ticker ORDER BY date) AS lagged_price
+					 FROM 	pricing_daily_new
+					 WHERE	price_type='Adjusted') AS a
+		INNER JOIN customer_ticker_list
+        USING(ticker)
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')) AS returns
+		GROUP BY returns.ticker),
+	-- combine customer ticker table and return of each ticker table
+		customer_ticker_return_detail_table AS (
+        SELECT  customer_id, 
+				ctl.ticker, 
+                ctl.value, 
+                ctl.quantity, 
+                ctl.weight, 
+                sec_type,
+                major_asset_class,
+                minor_asset_class,
+                mean,
+                standard_dev,
+                risk_adjusted_return
+			FROM customer_ticker_list AS ctl
+            LEFT JOIN return_of_each_ticker_table
+            USING (ticker)  ),
+    -- investment per each ticker per customer
+		group_by_ticker AS (
+        SELECT customer_id,
+                CONCAT('$ ',FORMAT(AVG(value),2)),
+                SUM(quantity),
+                CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+                sec_type,
+                major_asset_class,
+                FORMAT(AVG(mean),5),
+                FORMAT(AVG(standard_dev),5),
+                FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY sec_type, major_asset_class
+        ORDER BY SUM(weight * 100) DESC
+        ),
+        group_by_customer AS (
+                SELECT customer_id,
+                CONCAT('$ ',FORMAT(AVG(value),2)),
+                SUM(quantity),
+                CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+                sec_type,
+                major_asset_class,
+                FORMAT(AVG(mean),5),
+                FORMAT(AVG(standard_dev),5),
+                FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY customer_id
+        ORDER BY SUM(quantity) DESC
+        ),
+	-- create table for risk adj. return for all tickers
+		return_of_all_tickers_table AS (
+		SELECT	returns.ticker AS ticker,
+				AVG(returns.returns) AS mean,
+				STDDEV(returns.returns) * SQRT(250) AS standard_dev,
+				AVG(returns.returns)/(STDDEV(returns.returns)* SQRT(250)) AS risk_adjusted_return
+		FROM (SELECT a.date,
+					 a.ticker,
+					 (a.value-a.lagged_price)/a.lagged_price AS returns
+			  FROM ( SELECT *, LAG(value, 1)OVER(
+					 PARTITION BY ticker ORDER BY date) AS lagged_price
+					 FROM 	pricing_daily_new
+					 WHERE	price_type='Adjusted') AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')) AS returns
+		GROUP BY returns.ticker),
+	-- compare 2 tickers per each class for a total of 4 tickers
+	-- ticker 1
+		ticker1_table AS (
+        SELECT  ticker,
+				FORMAT(mean,5) AS mean,
+                FORMAT(standard_dev,5) AS standard_dev,
+                FORMAT(risk_adjusted_return,5) AS risk_adjusted_return
+        FROM return_of_all_tickers_table
+        WHERE ticker = varTicker1),
+	-- ticker 2
+		ticker2_table AS (
+        SELECT ticker,
+				FORMAT(mean,5) AS mean,
+                FORMAT(standard_dev,5) AS standard_dev,
+                FORMAT(risk_adjusted_return,5) AS risk_adjusted_return
+        FROM return_of_all_tickers_table
+        WHERE ticker = varTicker2),		
+	-- ticker 3
+        ticker3_table AS (
+        SELECT ticker,
+				FORMAT(mean,5) AS mean,
+                FORMAT(standard_dev,5) AS standard_dev,
+                FORMAT(risk_adjusted_return,5) AS risk_adjusted_return
+        FROM return_of_all_tickers_table
+        WHERE ticker = varTicker3),
+	-- ticker 4
+		ticker4_table AS (
+        SELECT ticker,
+				FORMAT(mean,5) AS mean,
+                FORMAT(standard_dev,5) AS standard_dev,
+                FORMAT(risk_adjusted_return,5) AS risk_adjusted_return
+        FROM return_of_all_tickers_table
+        WHERE ticker = varTicker4),
+        
+	-- total number of values
+		totalValueCount AS (
+		SELECT 	ticker, COUNT(*) AS total_count
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker1
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+        
+	-- correlation test for four tickers
+		price1 AS (
+		SELECT 	ticker AS ticker1, date, value AS value1
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker1
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+	-- create temp table for price 2
+		price2 AS (
+		SELECT 	date, ticker AS ticker2, value AS value2
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker2
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+	-- create temp table for price 3
+		price3 AS (
+		SELECT 	date, ticker AS ticker3, value AS value3
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker3
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+	-- create temp table for price 4
+		price4 AS (
+		SELECT 	date, ticker AS ticker4, value AS value4
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker4
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+	-- create temp table for all prices
+		price_table AS (
+		SELECT p1.date AS date,
+			   ticker1,
+			   ticker2,
+               ticker3,
+               ticker4,
+			   value1,
+               value2,
+               value3,
+               value4
+		FROM price1 AS p1
+		LEFT JOIN price2 AS p2
+        USING(date)
+        LEFT JOIN price3 AS p3
+        USING(date)
+        LEFT JOIN price4 AS p4
+        USING(date)),
+	-- calculate covariance
+		covariance AS (
+		SELECT FORMAT(AVG((tt1.risk_adjusted_return - tt1.mean) * (tt2.risk_adjusted_return - tt2.mean)),5) AS cov_return1_2,
+			   FORMAT(AVG((tt3.risk_adjusted_return - tt3.mean) * (tt4.risk_adjusted_return - tt4.mean)) ,5) AS cov_return3_4,
+               tvc.total_count AS count
+		FROM price_table AS pt
+		LEFT JOIN ticker1_table AS tt1
+        ON pt.ticker1 = tt1.ticker
+        LEFT JOIN ticker2_table AS tt2
+        ON pt.ticker2 = tt2.ticker
+        LEFT JOIN ticker3_table AS tt3
+        ON pt.ticker3 = tt3.ticker
+        LEFT JOIN ticker4_table AS tt4
+        ON pt.ticker4 = tt4.ticker
+        LEFT JOIN totalValueCount AS tvc
+        ON tvc.ticker = pt.ticker1
+        ),
+	-- calculate correlation
+		correlation AS (
+		SELECT 	cov_return1_2,
+				cov_return3_4,
+                tt1.mean AS mean1,
+                tt2.mean AS mean2,
+                tt3.mean AS mean3,
+                tt4.mean AS mean4,
+                tt1.standard_dev AS standard_dev1,
+                tt2.standard_dev AS standard_dev2,
+				tt3.standard_dev AS standard_dev3,
+                tt4.standard_dev AS standard_dev4,
+                count AS count,
+				FORMAT(cov_return1_2 / (tt1.standard_dev * tt2.standard_dev),5) AS corr_return1_2,
+				FORMAT(cov_return3_4 / (tt3.standard_dev * tt4.standard_dev),5) AS corr_return3_4
+		FROM covariance
+        CROSS JOIN ticker1_table AS tt1
+        CROSS JOIN ticker2_table AS tt2
+        CROSS JOIN ticker3_table AS tt3
+        CROSS JOIN ticker4_table AS tt4
+		)
+	
+        
+		-- create display form
+			SELECT 'Customer Portfolio','','','','','','','','','','','','',''
+			UNION
+			SELECT '','','','','','','','','','','','','',''
+            UNION
+			SELECT 'Customer Information','','','','','','','','','','','','',''
+            UNION
+			SELECT 'Customer ID','Full Name','Type','Account ID','Open Date','Status','Email','Location','','','','','',''
+            UNION            
+            SELECT *,'','','','','',''
+            FROM customer_information_table
+			UNION
+			SELECT ' ','','','','','','',' ','','','','','',''
+            UNION
+			SELECT 'Customer Invesment Summary','','','','','','','','','','','','',''
+            UNION
+			SELECT 'Customer ID','AVG. Price','Total Quantity','Weight','Sec. Type','Major Class','AVG. Mean','AVG. Std.','AVG. Risk Adj. Return','','','','',''
+            UNION
+            SELECT *,'','','','',' '
+            FROM group_by_customer
+			UNION
+			SELECT ' ','','','','','','','','',' ','','','',''
+            UNION
+			SELECT 'Customer Major Classes','','','','','','','','','','','','',''
+            UNION
+			SELECT 'Customer ID','AVG. Price','Total Quantity','Weight','Sec. Type','Major Class','AVG. Mean','AVG. Std.','AVG. Risk Adj. Return','','','','',''
+            UNION
+            SELECT *,'','','','',''
+            FROM group_by_ticker
+			UNION
+			SELECT '',' ',' ','','','  ',' ','','','','','','',''
+            UNION
+			SELECT 'Ticker Recommendations 1','','','','','','','','','','','','',''
+            UNION
+			SELECT 'Correlation between Ticker 1 and 2',corr_return1_2,cov_return1_2,standard_dev1,standard_dev2,count,mean1,mean2,mean3,mean4,'','','',''
+            FROM correlation
+            UNION
+			SELECT 'Ticker','Mean','Std. Dev','Risk Adj. Return','','','','','','','','','',''
+            UNION
+            SELECT *,'','','','','','','','','',''
+            FROM ticker1_table
+            UNION
+			SELECT *,'','','','','','','','','',''
+            FROM ticker2_table
+            UNION
+            SELECT 'Ticker Recommendations 2','','','','','','','',' ','','','','',''
+            UNION
+			SELECT 'Correlation between Ticker 1 and 2',corr_return3_4,cov_return3_4,standard_dev3,standard_dev4,'','','','','','','','',''
+            FROM correlation
+            UNION
+			SELECT 'Ticker','Mean','Std. Dev','Risk Adj. Return','','','','','','','','','',''
+            UNION
+            SELECT *,'','','','','','','','','',''
+            FROM ticker3_table
+            UNION
+			SELECT *,'','','','','','','','','',''
+            FROM ticker4_table
+            UNION
+            SELECT '','','','',' ','','','','','','','','',''
+            UNION
+            SELECT '','','','','','','','','','','','','',''
+            UNION
+			SELECT 'APPENDIX','','','','','','','','','','','','',''
+            UNION
+			SELECT 'Customer ID','Ticker','AVG. Value','Total Quantity','Weight','Sec Type','Major Class','Minor Class','Mean','STD.','Risk Adj. Return','','',''
+            UNION
+			SELECT *,'','',''
+            FROM customer_ticker_return_detail_table
+            ;
+END
