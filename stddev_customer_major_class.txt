@@ -1,0 +1,36 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `stddev_customer_major_class`(varCustomerId INT(3),varMonths INT(2))
+BEGIN
+	
+    
+    
+	 SELECT  ad.client_id, 
+			 cd.full_name, 
+             cd.customer_location, 
+             CONCAT('$ ',FORMAT(AVG(hc.value),2)) AS 'Average Price', 
+             SUM(hc.quantity) AS 'Sum of Quantity', 
+             CONCAT('$ ',FORMAT(SUM(hc.value * hc.quantity),2)) as 'Amount', 
+             AVG(hc.value * hc.quantity) as 'Mu',    
+             STDDEV(hc.value * hc.quantity) as 'Sigma',
+			 AVG(hc.value * hc.quantity) / STDDEV(hc.value * hc.quantity) AS 'Risk Adjusted Return',
+             CONCAT(FORMAT(SUM(hc.value * hc.quantity) * 100.0 / (
+															  SELECT SUM(hc1.value * hc1.quantity)
+															  FROM customer_details cd1
+															  LEFT JOIN account_dim ad1
+															  ON cd1.customer_id = ad1.client_id
+															  LEFT JOIN holdings_current hc1
+															  USING(account_id)
+                                                              WHERE ad1.client_id = varCustomerId
+															  ),2),'%') AS Proporation, 
+             sec_type, 
+             major_asset_class
+	 FROM customer_details cd
+	 LEFT JOIN account_dim ad
+	 ON cd.customer_id = ad.client_id
+	 LEFT JOIN holdings_current hc
+	 USING(account_id)
+	 LEFT JOIN security_masterlist sm
+	 USING(ticker)
+     WHERE ad.client_id = varCustomerId
+	 GROUP BY  ad.client_id, cd.full_name, cd.customer_location, sec_type, major_asset_class
+     ;
+END
