@@ -1,0 +1,11 @@
+This analysis has been done on the cloud database called "invest", providing analytical insight for the clients. We approached this holistically by analyzing all the clients in the database, or by selecting a specific client using their id from the database and providing very detailed analysis for each client. 
+
+Using our customized queries to answer the question such as:
+
+1. What is the most recent 12M**, 18M, 24M (months) return for each of the securities (and for the entire portfolio)? 
+2. What are the correlations between the clients' assets? Are there any interesting correlations?
+3. What is the most recent 12M sigma (risk) for each of the securities? 
+4. Based on the previous 3 questions, which holdings would we suggest selling or buying? Are there any outside securities that we would recommend adding to the portfolio?
+5. How will the clients' portfolio risk and expected returns change after rebalancing (selling and buying) including any new security?
+
+We made sure to provide very detailed recommendations for your client. Explain each result in a simple fashion. 
