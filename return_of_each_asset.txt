@@ -1,0 +1,61 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `return_of_each_asset`(varCustomerId INT(3))
+BEGIN
+	-- RETURNS
+	SELECT
+		security.ticker,
+		security.security_name,
+		security.sec_type,
+		security.major_asset_class,
+		security.minor_asset_class,
+		ROUND(price1.returns,4) AS 12M_returns,
+		ROUND(price2.returns,4) AS 18M_returns,
+		ROUND(price3.returns,4) AS 24M_returns
+	FROM		security_masterlist AS security
+	LEFT JOIN	(
+				SELECT	*,
+						(price.value-price.lagged_price)/price.lagged_price AS returns
+				FROM	(
+						SELECT *, LAG(value, 252)OVER(PARTITION BY ticker
+											ORDER BY date
+											) AS lagged_price
+						FROM 	pricing_daily_new
+						WHERE	price_type='Adjusted') AS price
+				)	AS price1
+		ON		security.ticker = price1.ticker
+	LEFT JOIN	(
+				SELECT	price.ticker,
+						price.date,
+						(price.value-price.lagged_price)/price.lagged_price AS returns
+				FROM	(
+						SELECT *, LAG(value, 378)OVER(
+											PARTITION BY ticker
+											ORDER BY date
+											) AS lagged_price
+						FROM 	pricing_daily_new
+						WHERE	price_type='Adjusted') AS price
+				)	AS price2
+		ON		price1.ticker = price2.ticker
+	LEFT JOIN	(
+				SELECT	price.ticker,
+						price.date,
+						(price.value-price.lagged_price)/price.lagged_price AS returns
+				FROM	(
+						SELECT *, LAG(value, 504)OVER(
+											PARTITION BY ticker
+											ORDER BY date
+											) AS lagged_price
+						FROM 	pricing_daily_new
+						WHERE	price_type='Adjusted') AS price
+				)	AS price3
+		ON		price2.ticker = price3.ticker
+	
+    LEFT JOIN holdings_current as hc
+    ON hc.ticker = security.ticker
+    LEFT JOIN account_dim as ad
+    USING(account_id)
+	WHERE		price1.date = '2022-09-09'
+		AND		price2.date = '2022-09-09'
+		AND		price3.date = '2022-09-09'
+        AND client_id = varCustomerId
+	GROUP BY	security.ticker;
+END
