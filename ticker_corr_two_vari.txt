@@ -1,0 +1,89 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `ticker_corr_two_vari`(varTicker VARCHAR(5), varTicker2 VARCHAR(5), varYear INT(4))
+BEGIN
+
+        -- create temp table for price 1
+		WITH price1 AS (
+			SELECT 	ticker AS ticker1, date, row_names, value AS value1
+			FROM pricing_daily_new as pdn
+			WHERE pdn.ticker = varTicker
+			AND date >= CONCAT(2022-varYear,'-09-09')
+			AND price_type = 'Adjusted'),
+        -- create temp table for price 2
+			price2 AS (
+            SELECT 	date, ticker AS ticker2, value AS value2
+			FROM pricing_daily_new as pdn
+			WHERE pdn.ticker = varTicker2
+			AND date >= CONCAT(2022-varYear,'-09-09')
+			AND price_type = 'Adjusted'),
+		-- create temp table for lag price 1
+            lag_price_table1 AS (
+            SELECT date, row_names + 1 AS row_names, value AS lag_price1
+			FROM pricing_daily_new
+			WHERE ticker = varTicker
+			AND date >= CONCAT(2022-varYear,'-09-08')
+			AND price_type = 'Adjusted'),
+		-- create temp table for lag price 2
+            lag_price_table2 AS (
+            SELECT date, row_names + 1 AS row_names, value AS lag_price2
+			FROM pricing_daily_new
+			WHERE ticker = varTicker2
+			AND date >= CONCAT(2022-varYear,'-09-08')
+			AND price_type = 'Adjusted'),
+		-- create temp table for return calculation
+			return_table AS (
+            SELECT p1.ticker1,
+				   p2.ticker2,
+				   value1, 
+				   value2, 
+                   lag_price1, 
+                   lag_price2, 
+                   (value1 - lag_price1)/lag_price1 AS return1, 
+                   (value2 - lag_price2)/lag_price1 AS return2
+            FROM price1 AS p1
+            LEFT JOIN price2 AS p2
+            ON p1.date = p2.date
+            LEFT JOIN lag_price_table1 AS lp1
+            ON lp1.row_names = p1.row_names
+            LEFT JOIN lag_price_table2 AS lp2
+            ON lp2.date = lp1.date),
+		-- calculate mean, standard deviation
+			mean AS (
+			SELECT  ticker1, 
+					ticker2, 
+                    FORMAT(AVG(value1),5) AS avg_p1, 
+                    FORMAT(AVG(value2),5) AS avg_p2, 
+                    FORMAT(AVG(return1),5) AS avg_r1, 
+                    FORMAT(AVG(return2),5) AS avg_r2,
+                    FORMAT(STDDEV(value1),5) AS std_p1,
+                    FORMAT(STDDEV(value2),5) AS std_p2,
+                    FORMAT(STDDEV(return1),5) AS std_r1,
+                    FORMAT(STDDEV(return2),5) AS std_r2
+			FROM return_table
+			GROUP BY ticker1, ticker2),
+		-- calculate covariance
+            covariance AS (
+            SELECT FORMAT(AVG((value1 - avg_p1) * (value2 - avg_p2)),5) AS cov_price,
+				   FORMAT(AVG((return1 - avg_r1) * (return2 - avg_r2)),5) AS cov_return
+            FROM return_table AS rt
+            LEFT JOIN mean AS m
+            ON rt.ticker1 = m.ticker1),
+		-- calculate correlation
+			correlation AS (
+            SELECT 	*,
+					FORMAT(cov_price / (std_p1 * std_p2),5) AS corr_price,
+					FORMAT(cov_return / (std_r1 * std_r2),5) AS corr_return
+			FROM mean
+            CROSS JOIN covariance
+            )
+            SELECT '','','','','','','','','','','','','',''
+            UNION
+            SELECT 'Correlation between',varTicker,'and',varTicker2,'for the most recent',varYear,'year period.','','','','','','',''
+            UNION
+            SELECT '','','','','','','','','','','','','',''
+            UNION
+            SELECT 'Ticker 1','Ticker 2','AVG Price1','AVG Price2','AVG Return1','AVG Return2','STD. Price1','STD. Price 2','STD Return1','STD Return2','COV. Price','COV. Return','CORR. Price','CORR. Return'
+            UNION
+            SELECT *
+			FROM correlation;
+            
+END
