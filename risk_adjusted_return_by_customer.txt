@@ -1,0 +1,61 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `risk_adjusted_return_by_customer`(varCustomerId INT(3), varYear INT(3))
+BEGIN
+	 DROP TABLE IF EXISTS return_of_each_ticker;
+     CREATE TABLE return_of_each_ticker AS (
+											SELECT	returns.ticker,
+												AVG(returns.returns) AS mean,
+												STDDEV(returns.returns) * SQRT(250) AS standard_dev,
+												AVG(returns.returns)/(STDDEV(returns.returns)* SQRT(250)) AS risk_adjusted_return
+											FROM (
+												SELECT	a.date,
+														a.ticker,
+														(a.value-a.lagged_price)/a.lagged_price AS returns
+												FROM (
+														SELECT *, LAG(value, 1)OVER(
+																				PARTITION BY ticker
+																				ORDER BY date
+																				) AS lagged_price
+														FROM 	pricing_daily_new
+														WHERE	price_type='Adjusted'
+													 ) AS a
+												WHERE date >= CONCAT(2021-varYear,'-09-09')
+												 ) AS returns
+											GROUP BY
+												returns.ticker);
+    
+	 SELECT  ad.client_id, 
+			 cd.full_name, 
+             cd.customer_location, 
+             hc.ticker, 
+             CONCAT('$ ',FORMAT(AVG(hc.value),2)) AS 'Average Price', 
+             SUM(hc.quantity) AS 'Sum of Quantity', 
+             CONCAT('$ ',FORMAT(SUM(hc.value * hc.quantity),2)) as 'Amount', 
+             CONCAT(FORMAT(hc.value * hc.quantity * 100.0 / (
+															  SELECT SUM(hc1.value * hc1.quantity)
+															  FROM customer_details cd1
+															  LEFT JOIN account_dim ad1
+															  ON cd1.customer_id = ad1.client_id
+															  LEFT JOIN holdings_current hc1
+															  USING(account_id)
+                                                              WHERE ad1.client_id = varCustomerId
+															  ),2),'%') AS Proporation, 
+			 mean,
+             standard_dev,
+             risk_adjusted_return,
+             sec_type, 
+             major_asset_class, 
+             minor_asset_class
+	 FROM customer_details cd
+	 LEFT JOIN account_dim ad
+	 ON cd.customer_id = ad.client_id
+	 LEFT JOIN holdings_current hc
+	 USING(account_id)
+	 LEFT JOIN security_masterlist sm
+	 USING(ticker)
+     LEFT JOIN return_of_each_ticker
+     USING (ticker)
+     WHERE ad.client_id = varCustomerId
+	 GROUP BY  ad.client_id, cd.full_name, cd.customer_location, hc.ticker, security_name, sec_type, major_asset_class, minor_asset_class
+     ;
+     DROP TABLE return_of_each_ticker;
+END
