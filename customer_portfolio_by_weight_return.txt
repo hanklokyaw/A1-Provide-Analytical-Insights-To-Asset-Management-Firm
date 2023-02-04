@@ -1,0 +1,132 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `customer_portfolio_by_weight_return`(varCustomerId INT(3), varYear INT(1), varTicker1 VARCHAR(6), varTicker2 VARCHAR(6), varTicker3 VARCHAR(6), varTicker4 VARCHAR(6))
+BEGIN
+
+	-- create customer information
+		WITH customer_information_table AS (
+        SELECT  cs.customer_id, 
+				full_name, 
+                opt38_desc, 
+                account_id, 
+                acct_open_date,
+                CASE WHEN acct_open_status THEN 'Active'
+					 ELSE 'Inactive' END,
+				email,
+                customer_location
+		FROM customer_details AS cs
+        LEFT JOIN account_dim AS ad
+        ON cs.customer_id = ad.client_id
+        WHERE cs.customer_id = varCustomerId),
+	-- create total number of investment for the customer
+        total_investment_amount_table AS (
+        SELECT client_id AS customer_id,
+			   SUM(value * quantity) AS total_investment
+        FROM holdings_current
+        LEFT JOIN account_dim
+        USING(account_id)
+        WHERE client_id = varCustomerId),
+	-- create customer ticker list
+		customer_ticker_list AS (
+		SELECT  ad.client_id AS customer_id, 
+				hc.ticker AS ticker,
+                AVG(value) AS value,
+                SUM(quantity) AS quantity,
+                SUM(value * quantity) AS amount,
+                SUM(value * quantity) / total_investment AS weight,
+                sec_type,
+                CASE WHEN major_asset_class = 'fixed_income' THEN 'fixed income'
+					 ELSE major_asset_class END AS major_asset_class,
+                minor_asset_class
+		 FROM account_dim AS ad
+		 LEFT JOIN holdings_current hc
+		 USING(account_id)
+         LEFT JOIN security_masterlist AS sm
+         USING(ticker)
+         LEFT JOIN total_investment_amount_table AS tiam
+         ON tiam.customer_id = ad.client_id
+		 WHERE ad.client_id = varCustomerId
+		 GROUP BY  ad.client_id, hc.ticker, sec_type, major_asset_class, minor_asset_class),
+	-- create return of each ticker table
+		return_of_each_ticker_table AS (
+		SELECT	returns.ticker AS ticker,
+				AVG(returns.returns) AS mean,
+				STDDEV(returns.returns) * SQRT(250) AS standard_dev,
+				AVG(returns.returns)/(STDDEV(returns.returns)* SQRT(250)) AS risk_adjusted_return
+		FROM (SELECT a.date,
+					 a.ticker,
+					 (a.value-a.lagged_price)/a.lagged_price AS returns
+			  FROM ( SELECT *, LAG(value, 1)OVER(
+					 PARTITION BY ticker ORDER BY date) AS lagged_price
+					 FROM 	pricing_daily_new
+					 WHERE	price_type='Adjusted') AS a
+		INNER JOIN customer_ticker_list
+        USING(ticker)
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')) AS returns
+		GROUP BY returns.ticker),
+	-- combine customer ticker table and return of each ticker table
+		customer_ticker_return_detail_table AS (
+        SELECT  customer_id, 
+				ctl.ticker, 
+                ctl.value, 
+                ctl.quantity, 
+                ctl.weight, 
+                sec_type,
+                major_asset_class,
+                minor_asset_class,
+                mean,
+                standard_dev,
+                risk_adjusted_return
+			FROM customer_ticker_list AS ctl
+            LEFT JOIN return_of_each_ticker_table
+            USING (ticker)  ),
+    -- investment per each ticker per customer
+		group_by_ticker AS (
+        SELECT customer_id,
+                CONCAT('$ ',FORMAT(AVG(value),2)),
+                SUM(quantity),
+                CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+                sec_type,
+                major_asset_class,
+                FORMAT(AVG(mean),5),
+                FORMAT(AVG(standard_dev),5),
+                FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY sec_type, major_asset_class
+        ORDER BY SUM(weight * 100) DESC
+        ),
+        group_by_customer AS (
+                SELECT customer_id,
+                CONCAT('$ ',FORMAT(AVG(value),2)),
+                SUM(quantity),
+                CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+                sec_type,
+                major_asset_class,
+                FORMAT(AVG(mean),5),
+                FORMAT(AVG(standard_dev),5),
+                FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY customer_id
+        ORDER BY SUM(quantity) DESC
+        ),
+	-- create table for risk adj. return for all tickers
+		return_of_all_tickers_table AS (
+		SELECT	returns.ticker AS ticker,
+				AVG(returns.returns) AS mean,
+				STDDEV(returns.returns) * SQRT(250) AS standard_dev,
+				AVG(returns.returns)/(STDDEV(returns.returns)* SQRT(250)) AS risk_adjusted_return
+		FROM (SELECT a.date,
+					 a.ticker,
+					 (a.value-a.lagged_price)/a.lagged_price AS returns
+			  FROM ( SELECT *, LAG(value, 1)OVER(
+					 PARTITION BY ticker ORDER BY date) AS lagged_price
+					 FROM 	pricing_daily_new
+					 WHERE	price_type='Adjusted') AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')) AS returns
+		GROUP BY returns.ticker)
+	
+    SELECT ticker, weight, value, weight * pdn.value
+    FROM customer_ticker_return_detail_table
+    LEFT JOIN pricing_daily_new AS pdn
+    USING(ticker)
+    WHERE date >= '2022-09-07';
+        
+END
