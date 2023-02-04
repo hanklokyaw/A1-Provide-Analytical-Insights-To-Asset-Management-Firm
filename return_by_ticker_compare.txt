@@ -1,0 +1,95 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `return_by_ticker_compare`(varTicker VARCHAR(5), varTicker2 VARCHAR(5), varYear INT(4), varDuration VARCHAR(10))
+BEGIN
+		DECLARE varRowName INT(10) DEFAULT 0;
+        
+        DROP TABLE IF EXISTS LAG_DAILY_TABLE;
+        DROP TABLE IF EXISTS LAG_DAILY_TABLE2;
+        DROP TABLE IF EXISTS LAG_MONTHLY_TABLE;
+        DROP TABLE IF EXISTS TICKER2;
+        
+        CREATE TABLE LAG_DAILY_TABLE AS (
+		SELECT row_names + 1 AS row_names, value AS lag_price
+		FROM pricing_daily_new
+		WHERE ticker = varTicker
+		AND date >= CONCAT(2022-varYear,'-09-08')
+		AND price_type = 'Adjusted');
+        
+		CREATE TABLE LAG_DAILY_TABLE2 AS (
+		SELECT row_names + 1 AS row_names, value AS lag_price
+		FROM pricing_daily_new
+		WHERE ticker = varTicker2
+		AND date >= CONCAT(2022-varYear,'-09-08')
+		AND price_type = 'Adjusted');
+        
+        CREATE TABLE TICKER2 AS (
+			SELECT 	date,
+					ticker AS ticker2, 
+					value AS value2, 
+					(value - lag_price) / lag_price AS lag_price2
+			FROM pricing_daily_new as pdn
+			LEFT JOIN LAG_DAILY_TABLE2
+			USING(row_names)
+			WHERE pdn.ticker = varTicker2
+			AND date >= CONCAT(2022-varYear,'-09-09')
+			AND price_type = 'Adjusted'
+        );
+        
+		 CREATE TABLE LAG_MONTHLY_TABLE AS (
+		 SELECT row_names + 1 AS row_names, value AS lag_price
+		 FROM pricing_daily_new
+		 WHERE ticker = varTicker
+		 AND YEAR(date) >= 2022 - varYear
+         AND DAY(date) = 9
+		 AND price_type = 'Adjusted')
+		 ;
+        
+        SELECT row_names INTO varRowName
+		FROM pricing_daily_new
+		WHERE ticker = varTicker
+        AND ( date = CONCAT(2022-varYear,'-09-06') OR date =  CONCAT(2022-varYear,'-09-09'))
+		AND price_type = 'Adjusted';
+        
+        -- CREATE TABLE LAG_MONTHLY_TABLE AS (
+        -- SELECT row_names + 21 AS row_names
+        -- FROM pricing_daily_new
+        -- WHERE ticker = varTicker
+        -- AND price_type = 'Adjusted'
+        -- AND row_names = varRowName
+        -- );
+        
+        IF varDuration LIKE '%daily%' OR varDuration LIKE '%day%' THEN 
+        ( 	
+			SELECT 	ticker AS 'Ticker 1', 
+					ticker2 AS 'Ticker 2',
+					date AS 'Date', 
+					CONCAT('$ ',FORMAT(value,2)) AS 'Value 1', 
+                    CONCAT('$ ',FORMAT(value2,2)) AS 'Value 2', 
+					CONCAT('$ ',FORMAT((value - lag_price) / lag_price,4)) AS 'Lag Price 1',
+                    CONCAT('$ ',FORMAT(lag_price2,4)) AS 'Lag Price 2'
+			FROM pricing_daily_new as pdn
+			LEFT JOIN LAG_DAILY_TABLE
+			USING(row_names)
+            LEFT JOIN TICKER2 AS t2
+            USING(date)
+			WHERE pdn.ticker = varTicker
+			AND date >= CONCAT(2022-varYear,'-09-09')
+			AND price_type = 'Adjusted');
+            
+		 ELSEIF varDuration LIKE '%monthly%' OR varDuration LIKE '%month%' THEN 
+        ( 	
+			SELECT 	ticker AS 'Ticker', 
+					date AS 'Date', 
+					CONCAT('$ ',FORMAT(value,2)) AS 'Value', 
+					CONCAT('$ ',FORMAT((value - lag_price)/ lag_price,4)) AS 'Lag Price'
+			FROM pricing_daily_new
+			LEFT JOIN LAG_MONTHLY_TABLE
+			USING(row_names)
+			WHERE ticker = varTicker
+			AND row_names IN (SELECT row_names FROM LAG_MONTHLY_TABLE)
+			AND price_type = 'Adjusted');
+            
+	ELSE SELECT 'Please enter correct ticker, year, duration';
+	END IF;
+    DROP TABLE LAG_DAILY_TABLE;
+    DROP TABLE LAG_MONTHLY_TABLE;
+END
