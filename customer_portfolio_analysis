@@ -1,0 +1,497 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `customer_portfolio_analysis`(varCustomerID INT(3), varYear INT(2), varTicker1 VARCHAR(6), varTicker2 VARCHAR(6), varTicker3 VARCHAR(6), varTicker4 VARCHAR(6))
+BEGIN
+
+	-- We try not to declare variables in the store procedure,
+	-- in case we are not allow to use store procedure,
+    -- we still could use view to operate the same result,
+    -- but need to modify the input paremeter.
+    
+	-- PART 1 customer information
+        WITH customer_information_table AS (
+        SELECT  cs.customer_id, 
+				full_name, 
+                opt38_desc, 
+                account_id, 
+                acct_open_date,
+                CASE WHEN acct_open_status THEN 'Active'
+					 ELSE 'Inactive' END,
+				email,
+                customer_location
+		FROM customer_details AS cs
+        LEFT JOIN account_dim AS ad
+        ON cs.customer_id = ad.client_id
+        WHERE cs.customer_id = varCustomerID),
+        
+-- PART 2 total investment table
+		total_investment_amount_table AS (
+        SELECT client_id AS customer_id,
+			   SUM(value * quantity) AS total_investment
+        FROM holdings_current
+        LEFT JOIN account_dim
+        USING(account_id)
+        WHERE client_id = varCustomerID),
+        
+-- PART 3 Customer's Ticker List
+		customer_ticker_list AS (
+		SELECT  ad.client_id AS customer_id, 
+				hc.ticker AS ticker,
+                AVG(value) AS value,
+                SUM(quantity) AS quantity,
+                SUM(value * quantity) AS amount,
+                SUM(value * quantity) / total_investment AS weight,
+                sec_type,
+                -- there are two in the database 'fix income' and 'fix_income', combine into one
+                CASE WHEN major_asset_class = 'fixed_income' THEN 'fixed income'
+					 ELSE major_asset_class END AS major_asset_class,
+                minor_asset_class
+		 FROM account_dim AS ad
+		 LEFT JOIN holdings_current hc
+		 USING(account_id)
+         LEFT JOIN security_masterlist AS sm
+         USING(ticker)
+         LEFT JOIN total_investment_amount_table AS tiam
+         ON tiam.customer_id = ad.client_id
+		 WHERE ad.client_id = varCustomerID
+		 GROUP BY  ad.client_id, hc.ticker, sec_type, major_asset_class, minor_asset_class
+         ORDER BY weight DESC),
+         
+-- PART 4 return of each ticker table
+		return_of_each_ticker_table AS (
+		SELECT	returns.ticker AS ticker,
+				AVG(returns.returns) AS mean,
+				STDDEV(returns.returns) AS standard_dev,
+				AVG(returns.returns)/(STDDEV(returns.returns)* SQRT(250)) AS risk_adjusted_return
+		FROM (SELECT a.date,
+					 a.ticker,
+					 (a.value-a.lagged_price)/a.lagged_price AS returns
+			  FROM ( SELECT *, LAG(value, 1)OVER(
+					 PARTITION BY ticker ORDER BY date) AS lagged_price
+					 FROM 	pricing_daily_new
+					 WHERE	price_type='Adjusted') AS a
+		INNER JOIN customer_ticker_list
+        USING(ticker)
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')) AS returns
+		GROUP BY returns.ticker),
+        
+-- PART 5 customer ticker return detail table        
+        customer_ticker_return_detail_table AS (
+        SELECT  customer_id, 
+				ctl.ticker, 
+                ctl.value, 
+                ctl.quantity, 
+                ctl.weight, 
+                sec_type,
+                major_asset_class,
+                minor_asset_class,
+                mean,
+                standard_dev,
+                risk_adjusted_return
+			FROM customer_ticker_list AS ctl
+            LEFT JOIN return_of_each_ticker_table
+            USING (ticker)),
+            
+-- PART 6 group by customer major class
+		group_by_major_class AS (
+        SELECT customer_id,
+                CONCAT('$ ',FORMAT(AVG(value),2)),
+                SUM(quantity),
+                CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+                sec_type,
+                major_asset_class,
+                FORMAT(AVG(mean),5),
+                FORMAT(AVG(standard_dev),5),
+                FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY sec_type, major_asset_class
+        ORDER BY SUM(weight * 100) DESC
+        ),
+        
+-- PART 7 investment per each ticker per customer
+		group_by_ticker AS (
+        SELECT customer_id,
+                CONCAT('$ ',FORMAT(AVG(value),2)),
+                SUM(quantity),
+                CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+                sec_type,
+                major_asset_class,
+                FORMAT(AVG(mean),5),
+                FORMAT(AVG(standard_dev),5),
+                FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY sec_type, major_asset_class
+        ORDER BY SUM(weight * 100) DESC
+        ),
+        
+-- PART 8 group by customer ticker in return table
+		group_by_customer AS (
+			SELECT customer_id,
+			CONCAT('$ ',FORMAT(AVG(value),2)),
+			SUM(quantity),
+			CONCAT(FORMAT(SUM(weight * 100),2),'%'),
+			sec_type,
+			major_asset_class,
+			FORMAT(AVG(mean),5),
+			FORMAT(AVG(standard_dev),5),
+			FORMAT(AVG(risk_adjusted_return),5)
+		FROM customer_ticker_return_detail_table
+        GROUP BY customer_id
+        ORDER BY SUM(quantity) DESC
+        ),
+        
+-- PART 9 Return of all tickers
+		return_of_all_tickers_table AS (
+        SELECT  a.date AS date,
+				a.ticker AS ticker,
+                a.value AS value,
+                a.lagged_price AS lagged_price,
+				(a.value-a.lagged_price)/a.lagged_price AS returns
+		FROM ( SELECT *, LAG(value, 1)OVER(
+				PARTITION BY ticker ORDER BY date) AS lagged_price
+				FROM 	pricing_daily_new
+				WHERE	price_type='Adjusted') AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')),
+	-- aggragate same tickers in the customer portfolio into one
+		agg_return_of_all_tickers_table AS (
+        SELECT	ticker AS ticker,
+				AVG(returns) AS mean,
+				STDDEV(returns) AS standard_dev,
+				AVG(returns)/(STDDEV(returns)* SQRT(250)) AS risk_adjusted_return
+		FROM return_of_all_tickers_table
+		GROUP BY ticker
+        ORDER BY risk_adjusted_return DESC),
+
+-- PART 10 total numebr of prices per given ticker (for weight calculation)
+		totalValueCount AS (
+		SELECT 	ticker, COUNT(*) AS total_count
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker1
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+
+-- PART 11 correlation test for four tickers
+	-- calcuation of expected returns, risk, and risk adjusted return
+	-- search per ticker daily value + lag_price 1
+		ticker_daily_price_lag_price_1 AS (
+		SELECT  a.date AS date,
+				a.ticker AS ticker1,
+                a.value AS value1,
+                a.lagged_price AS lagged_price1,
+				(a.value-a.lagged_price)/a.lagged_price AS return1
+		FROM ( SELECT *, LAG(value, 1)OVER(
+				PARTITION BY ticker ORDER BY date) AS lagged_price
+				FROM 	pricing_daily_new
+				WHERE	price_type='Adjusted'
+                AND ticker = varTicker1) AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')),
+	-- agg daily to mean, stddev and risk_adjusted_return for ticker 1
+		agg_ticker1_return AS (
+        SELECT  ticker1, 
+				FORMAT(AVG(return1),5) AS mean1, 
+                FORMAT(STDDEV(return1),5) AS std_dev1,
+				FORMAT(AVG(return1)/(STDDEV(return1)* SQRT(250)),5) AS risk_adjusted_return1
+		FROM ticker_daily_price_lag_price_1
+        GROUP BY ticker1),
+	-- search per ticker daily value + lag_price 2
+		ticker_daily_price_lag_price_2 AS (
+		SELECT  a.date AS date,
+				a.ticker AS ticker2,
+                a.value AS value2,
+                a.lagged_price AS lagged_price2,
+				(a.value-a.lagged_price)/a.lagged_price AS return2
+		FROM ( SELECT *, LAG(value, 1)OVER(
+				PARTITION BY ticker ORDER BY date) AS lagged_price
+				FROM 	pricing_daily_new
+				WHERE	price_type='Adjusted'
+                AND ticker = varTicker2) AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')),
+	-- agg daily to mean, stddev and risk_adjusted_return for ticker 2
+		agg_ticker2_return AS (
+        SELECT  ticker2, 
+				FORMAT(AVG(return2),5) AS mean2, 
+                FORMAT(STDDEV(return2),5) AS std_dev2,
+				FORMAT(AVG(return2)/(STDDEV(return2)* SQRT(250)),5) AS risk_adjusted_return2
+		FROM ticker_daily_price_lag_price_2
+        GROUP BY ticker2),
+	-- search per ticker daily value + lag_price 3
+		ticker_daily_price_lag_price_3 AS (
+		SELECT  a.date AS date,
+				a.ticker AS ticker3,
+                a.value AS value3,
+                a.lagged_price AS lagged_price3,
+				(a.value-a.lagged_price)/a.lagged_price AS return3
+		FROM ( SELECT *, LAG(value, 1)OVER(
+				PARTITION BY ticker ORDER BY date) AS lagged_price
+				FROM 	pricing_daily_new
+				WHERE	price_type='Adjusted'
+                AND ticker = varTicker3) AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')),
+	-- agg daily to mean, stddev and risk_adjusted_return for ticker 3
+		agg_ticker3_return AS (
+        SELECT  ticker3, 
+				FORMAT(AVG(return3),5) AS mean3, 
+                FORMAT(STDDEV(return3),5) AS std_dev3,
+				FORMAT(AVG(return3)/(STDDEV(return3)* SQRT(250)),5) AS risk_adjusted_return3
+		FROM ticker_daily_price_lag_price_3
+        GROUP BY ticker3),
+	-- search per ticker daily value + lag_price 4
+		ticker_daily_price_lag_price_4 AS (
+		SELECT  a.date AS date,
+				a.ticker AS ticker4,
+                a.value AS value4,
+                a.lagged_price AS lagged_price4,
+				(a.value-a.lagged_price)/a.lagged_price AS return4
+		FROM ( SELECT *, LAG(value, 1)OVER(
+				PARTITION BY ticker ORDER BY date) AS lagged_price
+				FROM 	pricing_daily_new
+				WHERE	price_type='Adjusted'
+                AND ticker = varTicker4) AS a
+		WHERE  date >= CONCAT(2022-varYear,'-09-09')),
+	-- agg daily to mean, stddev and risk_adjusted_return for ticker 4
+		agg_ticker4_return AS (
+        SELECT  ticker4, 
+				FORMAT(AVG(return4),5) AS mean4, 
+                FORMAT(STDDEV(return4),5) AS std_dev4,
+				FORMAT(AVG(return4)/(STDDEV(return4)* SQRT(250)),5) AS risk_adjusted_return4
+		FROM ticker_daily_price_lag_price_4
+        GROUP BY ticker4),
+
+-- PART 12 create total number of values
+		count_chosen_ticker AS (
+		SELECT 	ticker, COUNT(*) AS total_count
+		FROM pricing_daily_new as pdn
+		WHERE pdn.ticker = varTicker1
+		AND date >= CONCAT(2022-varYear,'-09-09')
+		AND price_type = 'Adjusted'),
+        
+-- PART 13 covariance between suggestion tickers, 2 for each
+		covariance AS (
+		SELECT  AVG((return1- ar1.mean1)*(return2- ar2.mean2)) as Cov_1_2,
+				AVG((return3- ar3.mean3)*(return4- ar4.mean4)) as Cov_3_4
+		FROM  ticker_daily_price_lag_price_1 AS p1
+		LEFT JOIN agg_ticker1_return AS ar1
+		USING(ticker1)
+		LEFT JOIN ticker_daily_price_lag_price_2 AS p2
+		ON p1.date = p2.date
+		LEFT JOIN agg_ticker2_return AS ar2
+		USING(ticker2)
+		LEFT JOIN ticker_daily_price_lag_price_3 AS p3
+		ON p1.date = p3.date
+		LEFT JOIN agg_ticker3_return AS ar3
+		USING(ticker3)    
+		LEFT JOIN ticker_daily_price_lag_price_4 AS p4
+		ON p1.date = p4.date
+		LEFT JOIN agg_ticker4_return AS ar4
+		USING(ticker4)
+		GROUP BY ticker1),
+    
+-- PART 14 correlation between suggestion tickers, 2 for each 
+		correlation AS (
+		SELECT  FORMAT(Cov_1_2/(std_dev1 * std_dev2),5) AS Cor_1_2,
+				FORMAT(Cov_3_4/(std_dev3 * std_dev4),5) AS Cor_3_4
+		FROM covariance
+		CROSS JOIN agg_ticker1_return
+		CROSS JOIN agg_ticker2_return
+		CROSS JOIN agg_ticker3_return
+		CROSS JOIN agg_ticker4_return),
+                
+-- PART 15 match suggesting tickers with best performing tickers
+	-- of the same minor class (to calcualte tracking error)
+	-- ticker1
+		ticker_to_minor_class_1 AS (
+		SELECT ticker, minor_asset_class
+		FROM agg_ticker1_return AS agt1
+		RIGHT JOIN security_masterlist AS sm
+		ON agt1.ticker1 = sm.ticker
+		WHERE minor_asset_class = (
+			SELECT minor_asset_class
+			FROM agg_ticker1_return AS agt1
+			RIGHT JOIN security_masterlist AS sm
+			ON agt1.ticker1 = sm.ticker
+			WHERE ticker = varTicker1
+			GROUP BY minor_asset_class)),
+	-- ticker2
+		ticker_to_minor_class_2 AS (
+		SELECT ticker, minor_asset_class
+		FROM agg_ticker2_return AS agt2
+		RIGHT JOIN security_masterlist AS sm
+		ON agt2.ticker2 = sm.ticker
+		WHERE minor_asset_class = (
+			SELECT minor_asset_class
+			FROM agg_ticker2_return AS agt2
+			RIGHT JOIN security_masterlist AS sm
+			ON agt2.ticker2 = sm.ticker
+			WHERE ticker = varTicker2
+			GROUP BY minor_asset_class)),
+	-- ticker3
+		ticker_to_minor_class_3 AS (
+		SELECT ticker, minor_asset_class
+		FROM agg_ticker3_return AS agt3
+		RIGHT JOIN security_masterlist AS sm
+		ON agt3.ticker3 = sm.ticker
+		WHERE minor_asset_class = (
+			SELECT minor_asset_class
+			FROM agg_ticker3_return AS agt3
+			RIGHT JOIN security_masterlist AS sm
+			ON agt3.ticker3 = sm.ticker
+			WHERE ticker = varTicker3
+			GROUP BY minor_asset_class)),
+	-- ticker4
+		ticker_to_minor_class_4 AS (
+		SELECT ticker, minor_asset_class
+		FROM agg_ticker4_return AS agt4
+		RIGHT JOIN security_masterlist AS sm
+		ON agt4.ticker4 = sm.ticker
+		WHERE minor_asset_class = (
+			SELECT minor_asset_class
+			FROM agg_ticker4_return AS agt4
+			RIGHT JOIN security_masterlist AS sm
+			ON agt4.ticker4 = sm.ticker
+			WHERE ticker = varTicker4
+			GROUP BY minor_asset_class)),		
+            
+-- PART 16 find the highest return from the ticker table
+	-- of the same minor class
+	-- ticker 1
+		find_best_match_minor_class_ticker1 AS (
+        SELECT 	tmnr.ticker AS original_ticker,
+                tmnr.minor_asset_class AS minor_asset_class,
+                risk_adjusted_return AS new_return1
+        FROM ticker_to_minor_class_1 AS tmnr
+        INNER JOIN agg_return_of_all_tickers_table rat
+        USING(ticker)
+		GROUP BY tmnr.ticker, tmnr.minor_asset_class
+        LIMIT 1),
+	-- ticker 2
+		find_best_match_minor_class_ticker2 AS (
+        SELECT 	tmnr.ticker AS original_ticker,
+                tmnr.minor_asset_class AS minor_asset_class,
+                risk_adjusted_return AS new_return2
+        FROM ticker_to_minor_class_2 AS tmnr
+        INNER JOIN agg_return_of_all_tickers_table rat
+        USING(ticker)
+		GROUP BY tmnr.ticker, tmnr.minor_asset_class
+        LIMIT 1),
+	-- ticker 3
+		find_best_match_minor_class_ticker3 AS (
+        SELECT 	tmnr.ticker AS original_ticker,
+                tmnr.minor_asset_class AS minor_asset_class,
+                risk_adjusted_return AS new_return3
+        FROM ticker_to_minor_class_3 AS tmnr
+        INNER JOIN agg_return_of_all_tickers_table rat
+        USING(ticker)
+		GROUP BY tmnr.ticker, tmnr.minor_asset_class
+        LIMIT 1),
+	-- ticker 4
+		find_best_match_minor_class_ticker4 AS (
+        SELECT 	tmnr.ticker AS original_ticker,
+                tmnr.minor_asset_class AS minor_asset_class,
+                risk_adjusted_return AS new_return4
+        FROM ticker_to_minor_class_4 AS tmnr
+        INNER JOIN agg_return_of_all_tickers_table rat
+        USING(ticker)
+		GROUP BY tmnr.ticker, tmnr.minor_asset_class
+        LIMIT 1),
+        
+-- PART 17 calcualte tracking or error ( We used a different approach by using best performance
+-- tickers in the same minor class, rather than using the S&P 500 or other index)
+	-- ticker 1
+		tracking_error_ticker1 AS (
+        SELECT risk_adjusted_return1, new_return1, FORMAT(risk_adjusted_return1 - new_return1,5) AS tracking_error_1
+        FROM agg_ticker1_return
+        CROSS JOIN find_best_match_minor_class_ticker1
+        ),
+	-- ticker 2
+		tracking_error_ticker2 AS (
+        SELECT risk_adjusted_return2, new_return2, FORMAT(risk_adjusted_return2 - new_return2,5) AS tracking_error_2
+        FROM agg_ticker2_return
+        CROSS JOIN find_best_match_minor_class_ticker2
+        ),
+	-- ticker 3
+		tracking_error_ticker3 AS (
+        SELECT risk_adjusted_return3, new_return3, FORMAT(risk_adjusted_return3 - new_return3,5) AS tracking_error_3
+        FROM agg_ticker3_return
+        CROSS JOIN find_best_match_minor_class_ticker3
+        ),
+	-- ticker 4
+		tracking_error_ticker4 AS (
+        SELECT risk_adjusted_return4, new_return4, FORMAT(risk_adjusted_return4 - new_return4,5) AS tracking_error_4
+        FROM agg_ticker4_return
+        CROSS JOIN find_best_match_minor_class_ticker4
+        )
+
+-- PART 18 creating report form
+		SELECT 'Customer Portfolio','','','','','','','','','','','','',''
+		UNION
+		SELECT '','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Customer Information','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Customer ID','Full Name','Type','Account ID','Open Date','Status','Email','Location','','','','','',''
+		UNION            
+		SELECT *,'','','','','',''
+		FROM customer_information_table
+		UNION
+		SELECT ' ','','','','','','',' ','','','','','',''
+		UNION
+		SELECT 'Customer Invesment Summary','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Customer ID','AVG. Price','Total Quantity','Weight','Sec. Type','Major Class','AVG. Mean','AVG. Std.','AVG. Risk Adj. Return','','','','',''
+		UNION
+		SELECT *,'','','','',' '
+		FROM group_by_customer
+		UNION
+		SELECT ' ','','','','','','','','',' ','','','',''
+		UNION
+		SELECT 'Customer Current Major Classes','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Customer ID','AVG. Price','Total Quantity','Weight','Sec. Type','Major Class','AVG. Mean','AVG. Std.','AVG. Risk Adj. Return','','','','',''
+		UNION
+		SELECT *,'','','','',''
+		FROM group_by_ticker
+		UNION
+		SELECT '',' ',' ','','','  ',' ','','','','','','',''
+		UNION
+		SELECT 'Ticker Recommendations 1','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Correlation between Ticker 1 and 2',Cor_1_2,'','','','','','','','','','','',''
+		FROM correlation
+		UNION
+		SELECT 'Ticker','Mean','Std. Dev','Risk Adj. Return','Tacking Error','','','','','','','','',''
+		UNION
+		SELECT ticker1,mean1,std_dev1,atr1.risk_adjusted_return1,tracking_error_1,'<TE compare with','best performing','similar minor class','','','','','',''
+		FROM agg_ticker1_return AS atr1
+        CROSS JOIN tracking_error_ticker1
+		UNION
+		SELECT ticker2,mean2,std_dev2,atr2.risk_adjusted_return2,tracking_error_2,'<TE compare with','best performing','similar minor class','','','','','',''
+		FROM agg_ticker2_return AS atr2
+		CROSS JOIN tracking_error_ticker2
+		UNION
+		SELECT 'Ticker Recommendations 2','','','','','','','',' ','','','','',''
+		UNION
+		SELECT 'Correlation between Ticker 1 and 2',Cor_3_4,'','','','','','','','','','','',''
+		FROM correlation
+		UNION
+		SELECT 'Ticker','Mean','Std. Dev','Risk Adj. Return','Tacking Error','','','','','','','','',''
+		UNION
+		SELECT ticker3,mean3,std_dev3,atr3.risk_adjusted_return3,tracking_error_3,'<TE compare with','best performing','similar minor class','','','','','',''
+		FROM agg_ticker3_return AS atr3
+		CROSS JOIN tracking_error_ticker3
+		UNION
+		SELECT ticker4,mean4,std_dev4,atr4.risk_adjusted_return4,tracking_error_4,'<TE compare with','best performing','similar minor class','','','','','',''
+		FROM agg_ticker4_return AS atr4
+		CROSS JOIN tracking_error_ticker4
+		UNION
+		SELECT '','','','',' ','','','','','','','','',''
+		UNION
+		SELECT '','','','','','','','','','','','','',''
+		UNION
+		SELECT 'APPENDIX','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Customer Current Holdings Detail List','','','','','','','','','','','','',''
+		UNION
+		SELECT 'Customer ID','Ticker','AVG. Value','Total Quantity','Weight','Sec Type','Major Class','Minor Class','Mean','STD.','Risk Adj. Return','','',''
+		UNION
+		SELECT customer_id,ticker,CONCAT('$ ',FORMAT(value,2)),quantity, CONCAT(FORMAT(weight * 100,2),'%'), sec_type, major_asset_class, minor_asset_class, FORMAT(mean,5), FORMAT(standard_dev,5), FORMAT(risk_adjusted_return,5),'','',''
+		FROM customer_ticker_return_detail_table
+		;
+END
